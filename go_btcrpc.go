@@ -8,10 +8,24 @@ import (
 	"io/ioutil"
 	"strconv"
 	"strings"
+	"time"
 
 	//"log"
 	"os/exec"
 )
+
+var user = "user"
+var password = "password"
+
+func make_client() *http.Client {
+	client := &http.Client{
+		Transport: &http.Transport{
+			MaxIdleConnsPerHost: 10,
+		},
+		Timeout: 120 * time.Second,
+	}
+	return client
+}
 
 func make_haircomb_call(url string, wait bool) string {
 	resp, err := http.Get("http://127.0.0.1:2121"+url)
@@ -32,7 +46,8 @@ func make_haircomb_call(url string, wait bool) string {
 	return "doesntmatter"
 	
 } 
-func make_bitcoin_call(values...string) string {
+
+func make_bitcoin_call_cli(values...string) string{
 	// run the btc command line
 
 	// Define paths
@@ -51,20 +66,51 @@ func make_bitcoin_call(values...string) string {
 	}
 
 	return out.String()
+}
+
+func make_bitcoin_call(client *http.Client, method string, params string) interface{} {
+
+	fmt.Println("MAKE CALL", method, params)
+	// make post
+	body := strings.NewReader("{\"jsonrpc\":\"1.0\",\"id\":\"curltext\",\"method\":\""+method+"\",\"params\":["+params+"]}")
+	req, err := http.NewRequest("POST", "http://"+user+":"+password+"@127.0.0.1:8332", body)
+
+
+	if err != nil {
+		fmt.Println("phone btc ERROR", err)
+	}
+	req.Header.Set("Content-Type", "text/plain")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		fmt.Println(fmt.Println("phone btc ERROR 2", err))
+
+	}
+
+	defer resp.Body.Close()
+
+	resp_bytes, err :=  ioutil.ReadAll(resp.Body)
+	if err != nil {
+		fmt.Println(fmt.Println("phone btc ERROR 3", err))
+
+	}
+	var result map[string]interface{}
+
+	err = json.Unmarshal(resp_bytes, &result)
+	if err != nil {
+		fmt.Println("ERROR", err)
+	}
+
+	return result["result"]
 
 }
 
-func get_all_P2WSH(block_json string) [][2]string {
-	var decoded map[string]interface{}
-	err := json.Unmarshal([]byte(block_json), &decoded)
 
-	if err != nil{
-		fmt.Println("JSON ERROR", err)
-	}
+func get_all_P2WSH(block_json map[string]interface{}) [][2]string {
 
-	txes := decoded["tx"].([]interface{})
+	txes := block_json["tx"].([]interface{})
 	var new_P2WSHes [][2]string
-	block_height := int(decoded["height"].(float64))
+	block_height := int(block_json["height"].(float64))
 	fmt.Println(block_height)
 
 	// For each TX...
@@ -137,8 +183,11 @@ func mine_block(block [][2]string) {
 }
 
 func main() {
-
 	// SETUP
+
+	// make the http client
+	http_client := make_client()
+
 
 	// ping haircomb for highest known block.
  	base_height := make_haircomb_call("/height/get", true)
@@ -160,12 +209,11 @@ func main() {
 		fmt.Println("Pulling for", curr_height) 
 
 		// Get hash and remove \n
-		hash := strings.TrimRight(make_bitcoin_call("getblockhash", fmt.Sprint(curr_height)), "\r\n")
-		fmt.Println(hash)
-
+		hash := strings.TrimRight(fmt.Sprintf("%v", make_bitcoin_call(http_client, "getblockhash", fmt.Sprint(curr_height))), "\r\n")
 
 		// Get Block 
-		block := make_bitcoin_call("getblock", hash, "2")
+		block := make_bitcoin_call(http_client, "getblock", "\""+hash+"\", "+"2").(map[string]interface{})
+		//block := make_bitcoin_call_cli("getblock", hash, "2")
 
 		//get_all_new_P2WSH(block)
 		blocks_P2WSH := get_all_P2WSH(block)
