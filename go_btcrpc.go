@@ -22,7 +22,7 @@ func make_client() *http.Client {
 		Transport: &http.Transport{
 			MaxIdleConnsPerHost: 10,
 		},
-		Timeout: 120 * time.Second,
+		Timeout: 300 * time.Second,
 	}
 	return client
 }
@@ -106,10 +106,9 @@ func make_bitcoin_call(client *http.Client, method string, params string) interf
 }
 
 
-func get_all_P2WSH(block_json map[string]interface{}) [][2]string {
+func get_all_P2WSH(block_json map[string]interface{}, reorg bool) {
 
 	txes := block_json["tx"].([]interface{})
-	var new_P2WSHes [][2]string
 	block_height := int(block_json["height"].(float64))
 	fmt.Println(block_height)
 
@@ -118,20 +117,12 @@ func get_all_P2WSH(block_json map[string]interface{}) [][2]string {
 
 		// ...Check all outputs for new P2WSH
 		this_tx := txes[i].(map[string]interface{})
-		result := scan_tx_for_P2WSH(this_tx, block_height, i)
-
-		// If some amount of new P2WSH were found...
-		if result != nil {
-			// ...Stick them all on the end as individual entries
-			new_P2WSHes = append(new_P2WSHes, result...)
-		}	
+		mine_tx_P2WSHes(this_tx, block_height, i, reorg)
+		
 	}
-	return new_P2WSHes
-
 }
 
- func scan_tx_for_P2WSH(tx_info map[string]interface{}, block_height, txno int) [][2]string {
-	var res [][2]string
+ func mine_tx_P2WSHes(tx_info map[string]interface{}, block_height, txno int, reorg bool) {
  	vout := tx_info["vout"].([]interface{})
 	for i := range vout {
 		this_out := vout[i].(map[string]interface{})
@@ -151,19 +142,21 @@ func get_all_P2WSH(block_json map[string]interface{}) [][2]string {
 					if scriptPubKey["hex"] != nil{
 						hex := fmt.Sprintf("%v", scriptPubKey["hex"])
 
-						// Format the entry
-						full_entry := format_entry(hex, block_height, txno, i)
-
-						// Append to curr tx result
-						res = append(res, full_entry)
-						
+						// Format and mine
+						if reorg {
+							// Not sure how to do this yet
+							fmt.Println("REORG")
+							url := "/mining/mine/"+strings.ToUpper(hex[4:])+"/"+fmt.Sprintf("%08d%04d%04d", 50000000+block_height, txno, i)
+							make_haircomb_call(url, false)
+						} else {
+							url := "/mining/mine/"+strings.ToUpper(hex[4:])+"/"+fmt.Sprintf("%08d%04d%04d", block_height, txno, i)
+							make_haircomb_call(url, false)
+						}
 					}
 				}
 			}
 		}
 	} 
-	
-	return res 
 } 
 
 func format_entry( hex string, height, txno, voutno int) [2]string {
@@ -182,18 +175,31 @@ func mine_block(block [][2]string) {
 	}
 }
 
+
+func reorg_check(client *http.Client, hc_height int) bool {
+	// Reference the mined blocks db for the most recent block hash, and compare it against the hash of the block in the BTC chain
+	if get_hc_block_hash(hc_height) == strings.TrimRight(fmt.Sprintf("%v", make_bitcoin_call(client, "getblockhash", fmt.Sprint(hc_height))), "\r\n") {
+		return false
+	} 
+	return true
+}
+
+func get_hc_block_hash(height int) string {
+	// Pull from the stored DB of HC's mined blocks
+	return "hash_here"
+}
+
 func main() {
 	// SETUP
 
 	// make the http client
 	http_client := make_client()
 
-
-	// ping haircomb for highest known block.
- 	base_height := make_haircomb_call("/height/get", true)
+	// ping haircomb for highest known block
+	base_height := make_haircomb_call("/height/get", true)
 	fmt.Println(base_height)
 
-	//format curr_height
+	// format curr_height
 	curr_height, err := strconv.Atoi(base_height)
 	if err != nil {
 		fmt.Println("stringtoint ERROR", err)
@@ -204,30 +210,50 @@ func main() {
 		curr_height = 481824
 	}
 
-	// RUN
+
+	// RUN OUTER LOOP
 	for {
-		fmt.Println("Pulling for", curr_height) 
+		// wait 5 seconds
+		time.Sleep(5 * time.Second)
 
-		// Get hash and remove \n
-		hash := strings.TrimRight(fmt.Sprintf("%v", make_bitcoin_call(http_client, "getblockhash", fmt.Sprint(curr_height))), "\r\n")
+		// Check for reorg 
+		/*if reorg_check(http_client, curr_height) {
+			// Find the reorged block and set curr_height to it
+				// Find by going back and comparing mined block hashes against BTC block hashes. The earliest difference is the reorged block.
 
-		// Get Block 
-		block := make_bitcoin_call(http_client, "getblock", "\""+hash+"\", "+"2").(map[string]interface{})
-		//block := make_bitcoin_call_cli("getblock", hash, "2")
+			// Process for reorg , not sure how to do this yet
+		}*/
 
-		//get_all_new_P2WSH(block)
-		blocks_P2WSH := get_all_P2WSH(block)
+		// Pull the current BTC height
+		btc_height := int(make_bitcoin_call(http_client, "getblockcount", "").(float64))
 
-		// Add a flush
-		blocks_P2WSH = append(blocks_P2WSH, [2]string{"FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF", "9999999999999999"})
+		// If caught up, skip this cycle
+		if btc_height == curr_height {
+			continue
+		}
 
-		// Mine Block
-		mine_block(blocks_P2WSH)
+		// RUN INNER LOOP
+		for {
+			fmt.Println("Pulling for", curr_height) 
 
-		// Increment Height, repeat
-		curr_height+=1
-		fmt.Println(blocks_P2WSH)
+			// Get hash and remove \n
+			hash := strings.TrimRight(fmt.Sprintf("%v", make_bitcoin_call(http_client, "getblockhash", fmt.Sprint(curr_height))), "\r\n")
+
+			// Get Block 
+			block := make_bitcoin_call(http_client, "getblock", "\""+hash+"\", "+"2").(map[string]interface{})
+			//block := make_bitcoin_call_cli("getblock", hash, "2")
+
+			// Mine all the block (block)
+			get_all_P2WSH(block, false)
+
+			// Mine a flush
+			make_haircomb_call("/mining/mine/FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF/9999999999999999", false)
+
+			// Increment Height, repeat if not btc_height reached
+			curr_height+=1
+			if curr_height == btc_height {
+				break
+			}
+		}
 	}
-
-
 }
