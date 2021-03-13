@@ -11,28 +11,6 @@ import (
 	"sync"
 )
 
-// Haircomb Call
-
-func make_haircomb_call(url string, wait bool) string {
-	resp, err := http.Get("http://127.0.0.1:2121"+url)
-	if err != nil {
-		fmt.Println("phone comb ERROR", err)
-	}
-
-	defer resp.Body.Close()
-
-	if wait {
-		resp_bytes, err :=  ioutil.ReadAll(resp.Body)
-		if err != nil {
-			fmt.Println(fmt.Println("phone comb ERROR 2", err))
-
-		}
-		return string(resp_bytes)
-	}
-	return "doesntmatter"
-	
-} 
-
 // ~~~COUNTER~~~
 
 type Counter struct {
@@ -230,7 +208,7 @@ func (c Caller) run() {
 
 func read_block(index *Index, input *Call_Output) {
 	// Read the block
-	block_output := get_all_P2WSH(input.height, input.content.(map[string]interface{}))
+	block_output := p_get_all_P2WSH(input.height, input.content.(map[string]interface{}))
 	
 	// Wait your turn, then mine
 	for {
@@ -248,7 +226,7 @@ func read_block(index *Index, input *Call_Output) {
 	}
 }
 
-func get_all_P2WSH(height int, block_json map[string]interface{}) *Read_Block {
+func p_get_all_P2WSH(height int, block_json map[string]interface{}) *Read_Block {
 
 	add_array := [][4]string{}
 
@@ -372,13 +350,8 @@ func main() {
 		go callers[x].run()
 	}
 
-	//var my_time int
 	time_start := time.Now().UnixNano()
 	for {
-		//time.Sleep(5*time.Second)
-		//fmt.Println("MAIN LOOP")
-		//fmt.Println(len(output_channel))
-		
 		index.mine_counter.mu.Lock()
 		if index.mine_counter.h >= index.mine_counter.t{
 			index.mine_counter.mu.Unlock()
@@ -390,17 +363,6 @@ func main() {
 	}
 
 	fmt.Println("DONE")
-	fmt.Println("TIME:", (time.Now().UnixNano() - time_start)/10000)
-	/*
-	// Run a concurrent test
-	// Re-assign current_height
-	current_height = 555555
-
-	// Boot all callers
-	for x := range callers {
-		callers[x].run()
-	}
-	*/
-
+	fmt.Println("TIME:", float64(time.Now().UnixNano() - time_start)/float64(1000000000), "seconds")
 }	
 
