@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"io/ioutil"
-	"strconv"
+	//"strconv"
 	"strings"
 	"time"
 
@@ -88,7 +88,7 @@ func make_bitcoin_call(client *http.Client, method string, params string) interf
 	}
 
 	defer resp.Body.Close()
-
+	fmt.Println("DO DONE")
 	resp_bytes, err :=  ioutil.ReadAll(resp.Body)
 	if err != nil {
 		fmt.Println(fmt.Println("phone btc ERROR 3", err))
@@ -188,12 +188,19 @@ func get_hc_block_hash(height int) string {
 	// Pull from the stored DB of HC's mined blocks
 	return "hash_here"
 }
-
+/*
 func main() {
 	// SETUP
 
 	// make the http client
 	http_client := make_client()
+
+	x := 0 
+	for {
+		x++
+		fmt.Println("GO", x)
+		make_bitcoin_call(http_client, "getblock", "\"000000000000000000029c803d6802a05c73bee470b77749d1cee070230adfd1\", "+"2")
+	}
 
 	// ping haircomb for highest known block
 	base_height := make_haircomb_call("/height/get", true)
@@ -222,7 +229,7 @@ func main() {
 				// Find by going back and comparing mined block hashes against BTC block hashes. The earliest difference is the reorged block.
 
 			// Process for reorg , not sure how to do this yet
-		}*/
+		}
 
 		// Pull the current BTC height
 		btc_height := int(make_bitcoin_call(http_client, "getblockcount", "").(float64))
@@ -241,13 +248,16 @@ func main() {
 
 			// Get Block 
 			block := make_bitcoin_call(http_client, "getblock", "\""+hash+"\", "+"2").(map[string]interface{})
-			//block := make_bitcoin_call_cli("getblock", hash, "2")
+			
+			fmt.Println(curr_height, "Pulled")
 
 			// Mine all the block (block)
 			get_all_P2WSH(block, false)
 
 			// Mine a flush
 			make_haircomb_call("/mining/mine/FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF/9999999999999999", false)
+
+			fmt.Println(curr_height, "Mined")
 
 			// Increment Height, repeat if not btc_height reached
 			curr_height+=1
@@ -256,4 +266,5 @@ func main() {
 			}
 		}
 	}
-}
+}*/
+
