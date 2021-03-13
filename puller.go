@@ -56,16 +56,31 @@ type Call_Output struct {
 	content interface{}
 }
 
-// Output by Readers
-type Read_Output struct { 
+// Read_Block
+type Read_Block struct{
 	height int
 	content [][4]string
+}
+
+
+// ~~~INDEX~~~
+
+type Index struct {
+	// Channel to the miner, reffed by readers
+	to_miner chan [][4]string
+
+	// Counters
+	call_counter *Counter
+	mine_counter *Counter
 }
 
 
 // ~~~CALLER~~~
 
 type Caller struct {
+
+	index *Index
+
 	// Log info
 	user string
 	pass string
@@ -92,7 +107,7 @@ type Caller struct {
 }
 
 
-func make_caller(in_user, in_pass string, counter *Counter, out_chan chan Call_Output) *Caller {
+func make_caller(in_user, in_pass string, index *Index) *Caller {
 	in_http_client := &http.Client{
 		Transport: &http.Transport{
 			MaxIdleConnsPerHost: 10,
@@ -100,12 +115,12 @@ func make_caller(in_user, in_pass string, counter *Counter, out_chan chan Call_O
 		Timeout: 300 * time.Second,
 	}
 	caller := &Caller{
+		index: index,
 		user: in_user,
 		pass: in_pass,
 		http_client: in_http_client,
-		global_counter: counter,
-		out_chan: out_chan,
-
+		msg_in: make(chan Message),
+		msg_out: make(chan Message),
 	}
 	return caller
 }
@@ -184,24 +199,27 @@ func (c Caller) run() {
 
 		//fmt.Println("INNER LOOP")
 		// Lock counter
-		c.global_counter.mu.Lock()
+		c.index.call_counter.mu.Lock()
 
 		// If curr height is at target, stop
-		if c.global_counter.h >= c.global_counter.t {
+		if c.index.call_counter.h >= c.index.call_counter.t {
 			//fmt.Println("IM DONE")
-			c.global_counter.mu.Unlock()
+			c.index.call_counter.mu.Unlock()
 			c.active = false
 			continue
 		}
 
 		// Get my next pull and increment counter
-		c.current_pull = c.global_counter.h
-		c.global_counter.h++
-		c.global_counter.mu.Unlock()
+		c.current_pull = c.index.call_counter.h
+		c.index.call_counter.h++
+		c.index.call_counter.mu.Unlock()
 		
 		// Pull
 		//fmt.Println("CALLER PUSHING OUT")
-		c.out_chan <- Call_Output{height: c.current_pull, content: c.get_block_info_for_height(c.current_pull)}
+
+		co := &Call_Output{height: c.current_pull, content: c.get_block_info_for_height(c.current_pull)}
+		
+		go read_block(c.index, co)
 
 	}
 
@@ -210,25 +228,27 @@ func (c Caller) run() {
 
 // ~~~READER~~~
 
-type Reader struct {
-
-	// Input Channel (C2R -> Reader)
-	in_chan chan Call_Output
-
-	// Output Channel (Reader -> R2M)
-	rmanager *RManager
-}
-
-func make_reader(rmanager *RManager) *Reader {
-	//fmt.Println("READER MADE")
-	reader := &Reader{
-		in_chan: make(chan Call_Output),
-		rmanager: rmanager,
+func read_block(index *Index, input *Call_Output) {
+	// Read the block
+	block_output := get_all_P2WSH(input.height, input.content.(map[string]interface{}))
+	
+	// Wait your turn, then mine
+	for {
+		index.mine_counter.mu.Lock()
+		ch := index.mine_counter.h
+		index.mine_counter.mu.Unlock()
+		//fmt.Println(block_output.height)
+		switch {
+		case ch < block_output.height:
+			continue
+		case ch == input.height:
+			index.to_miner <- block_output.content
+			return
+		}
 	}
-	return reader
 }
 
-func (r Reader) get_all_P2WSH(height int, block_json map[string]interface{}) *Read_Output {
+func get_all_P2WSH(height int, block_json map[string]interface{}) *Read_Block {
 
 	add_array := [][4]string{}
 
@@ -271,7 +291,7 @@ func (r Reader) get_all_P2WSH(height int, block_json map[string]interface{}) *Re
 			}
 		}
 	} 	
-	output := &Read_Output{
+	output := &Read_Block{
 		height: height,
 		content: add_array,
 	}
@@ -279,191 +299,11 @@ func (r Reader) get_all_P2WSH(height int, block_json map[string]interface{}) *Re
 }
 
 
-func (r Reader) run() {
-	input := <-r.in_chan
-	//fmt.Println("READER GOT INPUT")
-	block_output := r.get_all_P2WSH(input.height, input.content.(map[string]interface{}))
-	r.rmanager.in_chan <- block_output
-}
-
-
-// ~~~C2R_FUNNEL~~~
-
-type C2R_Funnel struct {
-	
-	// Status
-	active bool
-
-	// Slice of callers
-	callers []*Caller
-
-	// Callers put info here
-	in_chan chan Call_Output 
-
-	// Ref to the miner, to give to readers on creation
-	rmanager *RManager
-
-	// Message Channels (Talks to Main)
-	msg_in chan Message
-	msg_out chan Message
-	
-
-}
-
-
-func make_c2r_funnel(in_chan chan Call_Output, callers []*Caller, rmanager *RManager) *C2R_Funnel {
-	c2r_funnel := &C2R_Funnel{
-		in_chan: in_chan,
-		callers: callers,
-		rmanager: rmanager,
-		msg_in: make(chan Message),
-		msg_out: make(chan Message),
-	}
-	return c2r_funnel
-}
-
-func (f C2R_Funnel) run() {
-	for {
-		
-		// Check messages
-		select {
-		case x, ok := <-f.msg_in:
-			if ok {
-				fmt.Println("msg1", x, ok)
-				msg := x
-				switch msg.msg {
-				case "quit":
-					return
-				case "onoff":
-					switch msg.val {
-					case 0:
-						f.active = false
-					case 1:
-						f.active = true
-					}
-				}
-			} else {
-				fmt.Println("msg2", x, ok)
-			}
-		default:
-			// No incoming
-		}
-			
-		
-
-		// If not active, sleep then skip
-		if !f.active {
-			time.Sleep(200*time.Millisecond)
-			continue
-		}
-		
-		// Receive From Callers
-		select {
-		case x, ok := <-f.in_chan:
-			if ok {
-				//fmt.Println("C2R_FUNNEL PULL IN")
-				// Make a new reader, start, add to list of active readers
-				new_reader := make_reader(f.rmanager)
-				go new_reader.run()
-				new_reader.in_chan <- x
-			} else {
-				fmt.Println("x2", ok)
-			}
-		default:
-			// No incoming
-		}
-
-	}
-}
-
-// ~~~RManager~~~
-
-type RManager struct {
-
-	// Readers dump here
-	in_chan chan *Read_Output
-
-	// Counter, used for subroutines
-	rm_counter *RM_Counter
-
-	// Miner ref
-	miner *Miner
-
-}
-
-type RM_Counter struct {
-
-	// Lock
-	mu sync.Mutex
-
-	// Current Height
-	mined_height int
-
-	// Target Height
-	target_height int
-	
-}
-
-func make_rmanager(counter *Counter) *RManager {
-	counter.mu.Lock()
-	rm_counter := &RM_Counter{
-		mined_height: counter.h,
-		target_height: counter.t,
-	}
-	miner := &Miner{
-		in_chan: make(chan [][4]string),
-	}
-	counter.mu.Unlock()
-	rmanager := &RManager{
-		in_chan: make(chan *Read_Output),
-		rm_counter: rm_counter,
-		miner: miner,
-		
-	}
-	//fmt.Println("MAKERM", rmanager.in_chan)
-	return rmanager
-}
-
-func (rm RManager) run() {
-	go rm.miner.run()
-	for {
-		// Spawn new goroutine for each pull
-		go rm_instance(<-rm.in_chan, rm.rm_counter, rm.miner)
-	}
-}
-
-func rm_instance(input *Read_Output, rm_counter *RM_Counter, miner *Miner) {
-	
-	// Wait until its my turn, then initiate mining
-	for {
-		rm_counter.mu.Lock()
-		ch := rm_counter.mined_height
-		rm_counter.mu.Unlock()
-		fmt.Println(input.height)
-		switch {
-		case ch < input.height:
-			continue
-		case ch == input.height:
-			miner.in_chan <- input.content
-			rm_counter.mu.Lock()
-			rm_counter.mined_height++
-			rm_counter.mu.Unlock()
-			return
-		}
-	}
-}
-
 // ~~~MINER~~~
 
 type Miner struct {
+	index *Index
 	in_chan chan [][4]string
-}
-
-func make_miner() *Miner {
-	miner := &Miner{
-		in_chan: make(chan [][4]string),
-	}
-	return miner
 }
 
 func (m Miner) mine(input [][4]string) {
@@ -472,76 +312,81 @@ func (m Miner) mine(input [][4]string) {
 		//make_haircomb_call(url, false)
 		fmt.Sprint(url)
 	}
+
+	if len(input) > 0 {
+		fmt.Println("MINED:", input[0][1])
+	}
 }
 
 func (m Miner) run() {
 	for {
 		m.mine(<-m.in_chan)
+		m.index.mine_counter.mu.Lock()
+		m.index.mine_counter.h++
+		m.index.mine_counter.mu.Unlock()
+
 	}
 }
 
 
-
-
 func main() {
-	fmt.Println("1")
-
-	// Make the counter
-	global_counter := Counter{
+	// Make the counters
+	call_counter := &Counter{
+		h: 555550,
+		t: 555600,
+	}
+	mine_counter := &Counter{
 		h: 555550,
 		t: 555600,
 	}
 
-	// Make caller output channel
-	caller_output_channel := make(chan Call_Output, 1)
-	fmt.Println("2")
+	// Make the index
+	index := &Index{
+		call_counter: call_counter,
+		mine_counter: mine_counter,
+		to_miner: make(chan [][4]string),
+	}
+	
 
 	// Make callers
 	callers := []*Caller{}
 	for x:= 1; x <= 5; x++ {
-		callers = append(callers, make_caller("user", "password", &global_counter, caller_output_channel))
+		callers = append(callers, make_caller("user", "password", index))
 	}
-	fmt.Println("3")
 
-	// Make rm_manager
-	rmanager := make_rmanager(&global_counter)
-	go rmanager.run()
-
-	// Make c2r_funnel
-	c2r_funnel := make_c2r_funnel(caller_output_channel, callers, rmanager)
-	
-	go c2r_funnel.run()
-	fmt.Println("4")
-	c2r_funnel.msg_in <- Message{"onoff", 1}
-
+	// Make the miner
+	miner := &Miner{
+		index: index,
+		in_chan: index.to_miner,
+	}
+	go miner.run()
 	
 	// Run a non-concurrent test
-	callers[0].active = true
-	go callers[0].run()
+	/*callers[0].active = true
+	go callers[0].run()*/
 	
-	
-
 	
 	// Run a concurrent test
-	/*for x := range callers {
+	for x := range callers {
 		callers[x].active = true
 		go callers[x].run()
-	}*/
+	}
+
 	//var my_time int
 	time_start := time.Now().UnixNano()
 	for {
 		//time.Sleep(5*time.Second)
 		//fmt.Println("MAIN LOOP")
 		//fmt.Println(len(output_channel))
-		/*
-		global_counter.mu.Lock()
-		if global_counter.h >= target_height{
-			global_counter.mu.Unlock()
+		
+		index.mine_counter.mu.Lock()
+		if index.mine_counter.h >= index.mine_counter.t{
+			index.mine_counter.mu.Unlock()
 			break
 		}
-		global_counter.mu.Unlock()*/
+		index.mine_counter.mu.Unlock()
 		//my_time++
-		time.Sleep(time.Second)
+		time.Sleep(time.Millisecond)
 	}
 
 	fmt.Println("DONE")
