@@ -129,7 +129,6 @@ func (c Caller) make_bitcoin_call(method string, params string) interface{} {
 	}
 
 	defer resp.Body.Close()
-	fmt.Println("DO DONE")
 	resp_bytes, err :=  ioutil.ReadAll(resp.Body)
 	if err != nil {
 		fmt.Println(fmt.Println("phone btc ERROR 3", err))
@@ -183,13 +182,13 @@ func (c Caller) run() {
 			continue
 		}
 
-		fmt.Println("INNER LOOP")
+		//fmt.Println("INNER LOOP")
 		// Lock counter
 		c.global_counter.mu.Lock()
 
 		// If curr height is at target, stop
 		if c.global_counter.h >= c.global_counter.t {
-			fmt.Println("IM DONE")
+			//fmt.Println("IM DONE")
 			c.global_counter.mu.Unlock()
 			c.active = false
 			continue
@@ -201,7 +200,7 @@ func (c Caller) run() {
 		c.global_counter.mu.Unlock()
 		
 		// Pull
-		fmt.Println("CALLER PUSHING OUT")
+		//fmt.Println("CALLER PUSHING OUT")
 		c.out_chan <- Call_Output{height: c.current_pull, content: c.get_block_info_for_height(c.current_pull)}
 
 	}
@@ -221,7 +220,7 @@ type Reader struct {
 }
 
 func make_reader(rmanager *RManager) *Reader {
-	fmt.Println("READER MADE")
+	//fmt.Println("READER MADE")
 	reader := &Reader{
 		in_chan: make(chan Call_Output),
 		rmanager: rmanager,
@@ -237,12 +236,12 @@ func (r Reader) get_all_P2WSH(height int, block_json map[string]interface{}) *Re
 	//block_height := int(block_json["height"].(float64))
 
 	// For each TX...
-	for i := range txes {
+	for x := range txes {
 
 		// ...Check all outputs for P2WSH
-		tx_info := txes[i].(map[string]interface{})
+		tx_info := txes[x].(map[string]interface{})
 		vout := tx_info["vout"].([]interface{})
-		for x := range vout {
+		for i := range vout {
 			this_out := vout[i].(map[string]interface{})
 	
 			// If it has a scriptPubKey
@@ -262,8 +261,8 @@ func (r Reader) get_all_P2WSH(height int, block_json map[string]interface{}) *Re
 							ro := [4]string{
 								strings.ToUpper(hex[4:]),
 								fmt.Sprintf("%04d", height),
-								fmt.Sprintf("%04d", i),
-								fmt.Sprintf("%04d", x), 
+								fmt.Sprintf("%04d", x),
+								fmt.Sprintf("%04d", i), 
 							}
 							add_array = append(add_array, ro)
 						}
@@ -282,7 +281,7 @@ func (r Reader) get_all_P2WSH(height int, block_json map[string]interface{}) *Re
 
 func (r Reader) run() {
 	input := <-r.in_chan
-	fmt.Println("READER GOT INPUT")
+	//fmt.Println("READER GOT INPUT")
 	block_output := r.get_all_P2WSH(input.height, input.content.(map[string]interface{}))
 	r.rmanager.in_chan <- block_output
 }
@@ -362,7 +361,7 @@ func (f C2R_Funnel) run() {
 		select {
 		case x, ok := <-f.in_chan:
 			if ok {
-				fmt.Println("C2R_FUNNEL PULL IN")
+				//fmt.Println("C2R_FUNNEL PULL IN")
 				// Make a new reader, start, add to list of active readers
 				new_reader := make_reader(f.rmanager)
 				go new_reader.run()
@@ -421,31 +420,36 @@ func make_rmanager(counter *Counter) *RManager {
 		miner: miner,
 		
 	}
+	//fmt.Println("MAKERM", rmanager.in_chan)
 	return rmanager
 }
 
 func (rm RManager) run() {
-
-	// Spawn new goroutine for each pull
-	go rm_instance(<-rm.in_chan, rm.rm_counter, rm.miner)
+	go rm.miner.run()
+	for {
+		// Spawn new goroutine for each pull
+		go rm_instance(<-rm.in_chan, rm.rm_counter, rm.miner)
+	}
 }
 
 func rm_instance(input *Read_Output, rm_counter *RM_Counter, miner *Miner) {
-
 	
 	// Wait until its my turn, then initiate mining
 	for {
 		rm_counter.mu.Lock()
 		ch := rm_counter.mined_height
 		rm_counter.mu.Unlock()
+		fmt.Println(input.height)
 		switch {
 		case ch < input.height:
 			continue
 		case ch == input.height:
 			miner.in_chan <- input.content
+			rm_counter.mu.Lock()
+			rm_counter.mined_height++
+			rm_counter.mu.Unlock()
+			return
 		}
-		rm_counter.mu.Lock()
-		rm_counter.mu.Unlock()
 	}
 }
 
@@ -466,12 +470,14 @@ func (m Miner) mine(input [][4]string) {
 	for i := range input {
 		url := "/mining/mine/"+input[i][0]+"/"+input[i][1]+input[i][2]+input[i][3]
 		//make_haircomb_call(url, false)
-		fmt.Printf(url)
+		fmt.Sprint(url)
 	}
 }
 
 func (m Miner) run() {
-	m.mine(<-m.in_chan)
+	for {
+		m.mine(<-m.in_chan)
+	}
 }
 
 
