@@ -14,19 +14,45 @@ import (
 // ~~~COUNTER~~~
 
 type Counter struct {
-	mu sync.Mutex
-	h int // Height
+	sync.Mutex
+	s int // start
+	h int // height
 	t int // target
+	dir int // direction (mine: 1, unmine: -1)
+}
+
+func (c *Counter) tick() int {
+	c.Lock()
+	// If h is still within s->t go, else stop
+	switch (c.h >= c.s && c.h <= c.t) {
+	case true:
+		output := c.h
+		c.h = c.h + c.dir
+		c.Unlock()
+		return output
+	default:
+		c.Unlock()
+		return -1
+	}
 }
 
 
 // ~~~DATA TYPES~~~
 
-// Used to communicate with running objects
-type Message struct {
-	msg string
-	val int
+// Mining run config
+type Config struct {
+	// RPC Log Info
+	username string
+	password string
+
+	// Start and finish
+	start_height int
+	target_height int
+
+	// Mine/Unmine
+	direction int
 }
+
 
 // Output by callers
 type Call_Output struct {
@@ -44,6 +70,10 @@ type Read_Block struct{
 // ~~~INDEX~~~
 
 type Index struct {
+
+	// StopStart Marker. Routines check this; if false, stop. Only main routine modiufies
+	run bool
+
 	// Channel to the miner, reffed by readers
 	to_miner chan [][4]string
 
@@ -78,9 +108,6 @@ type Caller struct {
 	// Output Channel Reference
 	out_chan chan Call_Output
 
-	// Message Channels
-	msg_in chan Message
-	msg_out chan Message
 
 }
 
@@ -97,8 +124,6 @@ func make_caller(in_user, in_pass string, index *Index) *Caller {
 		user: in_user,
 		pass: in_pass,
 		http_client: in_http_client,
-		msg_in: make(chan Message),
-		msg_out: make(chan Message),
 	}
 	return caller
 }
@@ -152,7 +177,12 @@ func (c Caller) run() {
 	// Outer loop runs forever, inner loop only runs if set active
 
 	for {
+		// If run is off, stop running
+		if !c.index.run {
+			return
+		}
 
+		/*
 		// Check messages
 		for len(c.msg_in) > 0{
 			msg := <-c.msg_in
@@ -173,16 +203,28 @@ func (c Caller) run() {
 		if !c.active {
 			time.Sleep(200*time.Millisecond)
 			continue
-		}
+		}*/
 
 		//fmt.Println("INNER LOOP")
 		// Lock counter
-		c.index.call_counter.mu.Lock()
+		//c.index.call_counter.Lock()
 
+		res := c.index.call_counter.tick()
+		switch res {
+		case -1:
+			// STOP
+			continue
+		default:
+			// Pull for res
+			c.current_pull = res
+		}
+		//c.index.call_counter.Unlock()
+
+		/*
 		// If curr height is at target, stop
 		if c.index.call_counter.h >= c.index.call_counter.t {
 			//fmt.Println("IM DONE")
-			c.index.call_counter.mu.Unlock()
+			c.index.call_counter.Unlock()
 			c.active = false
 			continue
 		}
@@ -190,7 +232,7 @@ func (c Caller) run() {
 		// Get my next pull and increment counter
 		c.current_pull = c.index.call_counter.h
 		c.index.call_counter.h++
-		c.index.call_counter.mu.Unlock()
+		c.index.call_counter.Unlock()*/
 		
 		// Pull
 		//fmt.Println("CALLER PUSHING OUT")
@@ -212,9 +254,15 @@ func read_block(index *Index, input *Call_Output) {
 	
 	// Wait your turn, then mine
 	for {
-		index.mine_counter.mu.Lock()
+
+		// If run is off, stop running
+		if !index.run {
+			return
+		}
+
+		index.mine_counter.Lock()
 		ch := index.mine_counter.h
-		index.mine_counter.mu.Unlock()
+		index.mine_counter.Unlock()
 		//fmt.Println(block_output.height)
 		switch {
 		case ch < block_output.height:
@@ -291,31 +339,50 @@ func (m Miner) mine(input [][4]string) {
 		fmt.Sprint(url)
 	}
 
+	fmt.Println("MINED:", m.index.mine_counter.h)
+
+	/*
 	if len(input) > 0 {
 		fmt.Println("MINED:", input[0][1])
 	}
+	*/
 }
 
 func (m Miner) run() {
 	for {
+		// If run is off, stop running
+		if !m.index.run {
+			return
+		}
+		
+		// Mine the block
 		m.mine(<-m.in_chan)
-		m.index.mine_counter.mu.Lock()
-		m.index.mine_counter.h++
-		m.index.mine_counter.mu.Unlock()
+
+		// Increment counter
+		m.index.mine_counter.tick()
+		//m.index.mine_counter.Lock()
+		//m.index.mine_counter.h++
+		//m.index.mine_counter.Unlock()
 
 	}
 }
 
 
-func main() {
+func mine(config Config) {
+
+
 	// Make the counters
 	call_counter := &Counter{
-		h: 555550,
-		t: 555600,
+		s: config.start_height,
+		h: config.start_height,
+		t: config.target_height,
+		dir: config.direction,
 	}
 	mine_counter := &Counter{
-		h: 555550,
-		t: 555600,
+		s: config.start_height,
+		h: config.start_height,
+		t: config.target_height,
+		dir: config.direction,
 	}
 
 	// Make the index
@@ -323,25 +390,26 @@ func main() {
 		call_counter: call_counter,
 		mine_counter: mine_counter,
 		to_miner: make(chan [][4]string),
+		run: true,
 	}
 	
-
-	// Make callers
-	callers := []*Caller{}
-	for x:= 1; x <= 5; x++ {
-		callers = append(callers, make_caller("user", "password", index))
-	}
-
 	// Make the miner
 	miner := &Miner{
 		index: index,
 		in_chan: index.to_miner,
 	}
 	go miner.run()
-	
+		
+	// Make callers
+	callers := []*Caller{}
+	for x:= 1; x <= 6; x++ {
+		callers = append(callers, make_caller(config.username, config.password, index))
+	}
+
 	// Run a non-concurrent test
 	/*callers[0].active = true
-	go callers[0].run()*/
+	go callers[0].run()
+	*/
 	
 	
 	// Run a concurrent test
@@ -352,13 +420,12 @@ func main() {
 
 	time_start := time.Now().UnixNano()
 	for {
-		index.mine_counter.mu.Lock()
-		if index.mine_counter.h >= index.mine_counter.t{
-			index.mine_counter.mu.Unlock()
+		index.mine_counter.Lock()
+		if index.mine_counter.h == index.mine_counter.t+index.mine_counter.dir{
+			index.mine_counter.Unlock()
 			break
 		}
-		index.mine_counter.mu.Unlock()
-		//my_time++
+		index.mine_counter.Unlock()
 		time.Sleep(time.Millisecond)
 	}
 
@@ -366,3 +433,7 @@ func main() {
 	fmt.Println("TIME:", float64(time.Now().UnixNano() - time_start)/float64(1000000000), "seconds")
 }	
 
+
+func main() {
+	mine(Config{username: "user", password: "password", start_height: 555500, target_height: 555700, direction: 1})
+}
