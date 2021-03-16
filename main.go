@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"io/ioutil"
-	//"strconv"
+	"strconv"
 	"strings"
 	"time"
 
@@ -188,83 +188,36 @@ func get_hc_block_hash(height int) string {
 	// Pull from the stored DB of HC's mined blocks
 	return "hash_here"
 }
-/*
-func main() {
-	// SETUP
 
+func main() {
 	// make the http client
 	http_client := make_client()
-
-	x := 0 
-	for {
-		x++
-		fmt.Println("GO", x)
-		make_bitcoin_call(http_client, "getblock", "\"000000000000000000029c803d6802a05c73bee470b77749d1cee070230adfd1\", "+"2")
-	}
 
 	// ping haircomb for highest known block
 	base_height := make_haircomb_call("/height/get", true)
 	fmt.Println(base_height)
-
 	// format curr_height
 	curr_height, err := strconv.Atoi(base_height)
 	if err != nil {
 		fmt.Println("stringtoint ERROR", err)
 	}
-
 	// move currheight to first comb block (481824)
 	if curr_height < 481824 {
 		curr_height = 481824
 	}
 
-
-	// RUN OUTER LOOP
 	for {
 		// wait 5 seconds
 		time.Sleep(5 * time.Second)
 
-		// Check for reorg 
-		/*if reorg_check(http_client, curr_height) {
-			// Find the reorged block and set curr_height to it
-				// Find by going back and comparing mined block hashes against BTC block hashes. The earliest difference is the reorged block.
-
-			// Process for reorg , not sure how to do this yet
-		}
-
 		// Pull the current BTC height
 		btc_height := int(make_bitcoin_call(http_client, "getblockcount", "").(float64))
-
 		// If caught up, skip this cycle
 		if btc_height == curr_height {
 			continue
 		}
 
-		// RUN INNER LOOP
-		for {
-			fmt.Println("Pulling for", curr_height) 
-
-			// Get hash and remove \n
-			hash := strings.TrimRight(fmt.Sprintf("%v", make_bitcoin_call(http_client, "getblockhash", fmt.Sprint(curr_height))), "\r\n")
-
-			// Get Block 
-			block := make_bitcoin_call(http_client, "getblock", "\""+hash+"\", "+"2").(map[string]interface{})
-			
-			fmt.Println(curr_height, "Pulled")
-
-			// Mine all the block (block)
-			get_all_P2WSH(block, false)
-
-			// Mine a flush
-			make_haircomb_call("/mining/mine/FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF/9999999999999999", false)
-
-			fmt.Println(curr_height, "Mined")
-
-			// Increment Height, repeat if not btc_height reached
-			curr_height+=1
-			if curr_height == btc_height {
-				break
-			}
-		}
+		mine(MiningConfig{username: "user", password: "password", start_height: curr_height, target_height: btc_height, direction: 1, regtest: false})
 	}
-}*/
+}
 

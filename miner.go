@@ -3,12 +3,14 @@ package main
 import (
 	"fmt"
 	"io/ioutil"
+	"log"
+
 	//"log"
+	"encoding/json"
 	"net/http"
 	"strings"
-	"encoding/json"
-	"time"
 	"sync"
+	"time"
 )
 
 // ~~~COUNTER~~~
@@ -36,11 +38,18 @@ func (c *Counter) tick() int {
 	}
 }
 
+func (c *Counter) check() int {
+	c.Lock()
+	x := c.h
+	c.Unlock()
+	return x
+} 
+
 
 // ~~~DATA TYPES~~~
 
 // Mining run config
-type Config struct {
+type MiningConfig struct {
 	// RPC Log Info
 	username string
 	password string
@@ -51,6 +60,9 @@ type Config struct {
 
 	// Mine/Unmine
 	direction int
+
+	// Regtest
+	regtest bool
 }
 
 
@@ -80,6 +92,12 @@ type Index struct {
 	// Counters
 	call_counter *Counter
 	mine_counter *Counter
+
+	// Regtest
+	regtest bool
+
+	// Direction
+	direction int
 }
 
 
@@ -129,20 +147,26 @@ func make_caller(in_user, in_pass string, index *Index) *Caller {
 }
 
 func (c Caller) make_bitcoin_call(method string, params string) interface{} {
+	port := "8332"
+	if c.index.regtest{
+		port = "18443"
+	}
 
 	fmt.Println("MAKE CALL", method, params)
 	// make post
 	body := strings.NewReader("{\"jsonrpc\":\"1.0\",\"id\":\"curltext\",\"method\":\""+method+"\",\"params\":["+params+"]}")
-	req, err := http.NewRequest("POST", "http://"+c.user+":"+c.pass+"@127.0.0.1:8332", body)
+	req, err := http.NewRequest("POST", "http://"+c.user+":"+c.pass+"@127.0.0.1:"+port, body)
 
 	if err != nil {
 		fmt.Println("phone btc ERROR", err)
+		log.Fatal(err)
 	}
 	req.Header.Set("Content-Type", "text/plain")
 	resp, err := c.http_client.Do(req)
 	
 	if err != nil {
 		fmt.Println(fmt.Println("phone btc ERROR 2", err))
+		log.Fatal(err)
 
 	}
 
@@ -150,6 +174,7 @@ func (c Caller) make_bitcoin_call(method string, params string) interface{} {
 	resp_bytes, err :=  ioutil.ReadAll(resp.Body)
 	if err != nil {
 		fmt.Println(fmt.Println("phone btc ERROR 3", err))
+		log.Fatal(err)
 
 	}
 	var result map[string]interface{}
@@ -157,6 +182,7 @@ func (c Caller) make_bitcoin_call(method string, params string) interface{} {
 	err = json.Unmarshal(resp_bytes, &result)
 	if err != nil {
 		fmt.Println("ERROR", err)
+		log.Fatal(err)
 	}
 
 	return result["result"]
@@ -176,38 +202,25 @@ func (c Caller) get_block_info_for_height(height int) map[string]interface{} {
 func (c Caller) run() {
 	// Outer loop runs forever, inner loop only runs if set active
 
+	// Cycle counter
+	var x int
+
 	for {
 		// If run is off, stop running
 		if !c.index.run {
 			return
 		}
 
-		/*
-		// Check messages
-		for len(c.msg_in) > 0{
-			msg := <-c.msg_in
-			switch msg.msg {
-			case "quit":
-				return
-			case "onoff":
-				switch msg.val {
-				case 0:
-					c.active = false
-				case 1:
-					c.active = true
+		// Every 200 cycles check if ahead by 500, if so, wait until caught up to 200
+		if x >= 200 {
+			x = 0
+			if c.index.call_counter.check() > c.index.mine_counter.check() + 500*c.index.direction {
+				for c.index.call_counter.check() > c.index.mine_counter.check() + 200*c.index.direction{
+					time.Sleep(500 * time.Millisecond)
 				}
 			}
 		}
 
-		// If not active, sleep then skip
-		if !c.active {
-			time.Sleep(200*time.Millisecond)
-			continue
-		}*/
-
-		//fmt.Println("INNER LOOP")
-		// Lock counter
-		//c.index.call_counter.Lock()
 
 		res := c.index.call_counter.tick()
 		switch res {
@@ -218,31 +231,13 @@ func (c Caller) run() {
 			// Pull for res
 			c.current_pull = res
 		}
-		//c.index.call_counter.Unlock()
-
-		/*
-		// If curr height is at target, stop
-		if c.index.call_counter.h >= c.index.call_counter.t {
-			//fmt.Println("IM DONE")
-			c.index.call_counter.Unlock()
-			c.active = false
-			continue
-		}
-
-		// Get my next pull and increment counter
-		c.current_pull = c.index.call_counter.h
-		c.index.call_counter.h++
-		c.index.call_counter.Unlock()*/
-		
-		// Pull
-		//fmt.Println("CALLER PUSHING OUT")
 
 		co := &Call_Output{height: c.current_pull, content: c.get_block_info_for_height(c.current_pull)}
 		
 		go read_block(c.index, co)
 
+		x++
 	}
-
 }
 
 
@@ -266,8 +261,9 @@ func read_block(index *Index, input *Call_Output) {
 		//fmt.Println(block_output.height)
 		switch {
 		case ch < block_output.height:
+			time.Sleep(5*time.Millisecond)
 			continue
-		case ch == input.height:
+		case ch == block_output.height:
 			index.to_miner <- block_output.content
 			return
 		}
@@ -303,10 +299,11 @@ func p_get_all_P2WSH(height int, block_json map[string]interface{}) *Read_Block 
 	
 						// Pull the hex
 						if scriptPubKey["hex"] != nil{
+							//fmt.Println(scriptPubKey)
 							hex := fmt.Sprintf("%v", scriptPubKey["hex"])
 							ro := [4]string{
 								strings.ToUpper(hex[4:]),
-								fmt.Sprintf("%04d", height),
+								fmt.Sprintf("%08d", height),
 								fmt.Sprintf("%04d", x),
 								fmt.Sprintf("%04d", i), 
 							}
@@ -333,11 +330,17 @@ type Miner struct {
 }
 
 func (m Miner) mine(input [][4]string) {
+
+
 	for i := range input {
 		url := "/mining/mine/"+input[i][0]+"/"+input[i][1]+input[i][2]+input[i][3]
 		//make_haircomb_call(url, false)
-		fmt.Sprint(url)
+		p_make_haircomb_call(url, false)
+		//fmt.Sprint(url)
 	}
+
+	// Flush
+	p_make_haircomb_call("/mining/mine/FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF/9999999999999999", false)
 
 	fmt.Println("MINED:", m.index.mine_counter.h)
 
@@ -352,7 +355,7 @@ func (m Miner) run() {
 	for {
 		// If run is off, stop running
 		if !m.index.run {
-			return
+			//return
 		}
 		
 		// Mine the block
@@ -367,8 +370,28 @@ func (m Miner) run() {
 	}
 }
 
+func p_make_haircomb_call(url string, wait bool) string {
+	resp, err := http.Get("http://127.0.0.1:2121"+url)
+	if err != nil {
+		fmt.Println("phone comb ERROR", err)
+	}
 
-func mine(config Config) {
+	defer resp.Body.Close()
+
+	if wait {
+		resp_bytes, err :=  ioutil.ReadAll(resp.Body)
+		if err != nil {
+			fmt.Println(fmt.Println("phone comb ERROR 2", err))
+
+		}
+		return string(resp_bytes)
+	}
+	return "doesntmatter"
+	
+} 
+
+
+func mine(config MiningConfig) {
 
 
 	// Make the counters
@@ -391,6 +414,8 @@ func mine(config Config) {
 		mine_counter: mine_counter,
 		to_miner: make(chan [][4]string),
 		run: true,
+		regtest: config.regtest,
+		direction: config.direction,
 	}
 	
 	// Make the miner
@@ -432,8 +457,3 @@ func mine(config Config) {
 	fmt.Println("DONE")
 	fmt.Println("TIME:", float64(time.Now().UnixNano() - time_start)/float64(1000000000), "seconds")
 }	
-
-
-func main() {
-	mine(Config{username: "user", password: "password", start_height: 555500, target_height: 555700, direction: 1})
-}
