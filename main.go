@@ -1,21 +1,29 @@
 package main
 
 import (
-	"bytes"
-	"fmt"
+	//"bytes"
 	"encoding/json"
-	"net/http"
+	"fmt"
 	"io/ioutil"
+	"log"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
+	//"flag"
 
 	//"log"
-	"os/exec"
+	//"os/exec"
 )
 
-var user = "user"
+var username = "user"
 var password = "password"
+
+type UserConfig struct {
+	username string
+	password string
+	regtest bool
+}
 
 func make_client() *http.Client {
 	client := &http.Client{
@@ -47,33 +55,12 @@ func make_haircomb_call(url string, wait bool) string {
 	
 } 
 
-func make_bitcoin_call_cli(values...string) string{
-	// run the btc command line
-
-	// Define paths
-	var cli = "Y:/Storage/BTC_Blockchain/realBTC/Bitcoin/daemon/bitcoin-cli.exe"
-
-	cmd := exec.Command(cli, values...)
-	var out bytes.Buffer
-	var stderr bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &stderr
-	err := cmd.Run()
-
-
-	if err != nil {
-		fmt.Println(fmt.Sprint(err) + ": " + stderr.String())
-	}
-
-	return out.String()
-}
-
-func make_bitcoin_call(client *http.Client, method string, params string) interface{} {
+func make_bitcoin_call(client *http.Client, method, params string, u_config *UserConfig) interface{} {
 
 	fmt.Println("MAKE CALL", method, params)
 	// make post
 	body := strings.NewReader("{\"jsonrpc\":\"1.0\",\"id\":\"curltext\",\"method\":\""+method+"\",\"params\":["+params+"]}")
-	req, err := http.NewRequest("POST", "http://"+user+":"+password+"@127.0.0.1:8332", body)
+	req, err := http.NewRequest("POST", "http://"+u_config.username+":"+u_config.password+"@127.0.0.1:8332", body)
 
 
 	if err != nil {
@@ -106,79 +93,10 @@ func make_bitcoin_call(client *http.Client, method string, params string) interf
 }
 
 
-func get_all_P2WSH(block_json map[string]interface{}, reorg bool) {
 
-	txes := block_json["tx"].([]interface{})
-	block_height := int(block_json["height"].(float64))
-	fmt.Println(block_height)
-
-	// For each TX...
-	for i := range txes {
-
-		// ...Check all outputs for new P2WSH
-		this_tx := txes[i].(map[string]interface{})
-		mine_tx_P2WSHes(this_tx, block_height, i, reorg)
-		
-	}
-}
-
- func mine_tx_P2WSHes(tx_info map[string]interface{}, block_height, txno int, reorg bool) {
- 	vout := tx_info["vout"].([]interface{})
-	for i := range vout {
-		this_out := vout[i].(map[string]interface{})
-
-		// If it has a scriptPubKey
-		if this_out["scriptPubKey"] != nil{
-			scriptPubKey := this_out["scriptPubKey"].(map[string]interface{})
-
-			// If it has type
-			if scriptPubKey["type"] != nil{
-				my_type := scriptPubKey["type"].(string)
-				
-				// If type is "witness_v0_scripthash"
-				if my_type == "witness_v0_scripthash"{
-
-					// Pull the hex
-					if scriptPubKey["hex"] != nil{
-						hex := fmt.Sprintf("%v", scriptPubKey["hex"])
-
-						// Format and mine
-						if reorg {
-							// Not sure how to do this yet
-							fmt.Println("REORG")
-							url := "/mining/mine/"+strings.ToUpper(hex[4:])+"/"+fmt.Sprintf("%08d%04d%04d", 50000000+block_height, txno, i)
-							make_haircomb_call(url, false)
-						} else {
-							url := "/mining/mine/"+strings.ToUpper(hex[4:])+"/"+fmt.Sprintf("%08d%04d%04d", block_height, txno, i)
-							make_haircomb_call(url, false)
-						}
-					}
-				}
-			}
-		}
-	} 
-} 
-
-func format_entry( hex string, height, txno, voutno int) [2]string {
-	var output [2]string
-
-	//Format the hex by removing the 0020, and include
-	output[0] = strings.ToUpper(hex[4:])
-	output[1] = fmt.Sprintf("%08d%04d%04d", height, txno, voutno)
-	return output
-}
-
-func mine_block(block [][2]string) {
-	for i := range block {
-		url := "/mining/mine/"+block[i][0]+"/"+block[i][1]
-		make_haircomb_call(url, false)
-	}
-}
-
-
-func reorg_check(client *http.Client, hc_height int) bool {
+func reorg_check(client *http.Client, hc_height int, u_config *UserConfig) bool {
 	// Reference the mined blocks db for the most recent block hash, and compare it against the hash of the block in the BTC chain
-	if get_hc_block_hash(hc_height) == strings.TrimRight(fmt.Sprintf("%v", make_bitcoin_call(client, "getblockhash", fmt.Sprint(hc_height))), "\r\n") {
+	if get_hc_block_hash(hc_height) == strings.TrimRight(fmt.Sprintf("%v", make_bitcoin_call(client, "getblockhash", fmt.Sprint(hc_height), u_config)), "\r\n") {
 		return false
 	} 
 	return true
@@ -190,6 +108,14 @@ func get_hc_block_hash(height int) string {
 }
 
 func main() {
+	// Define the user config
+	u_config := &UserConfig{
+		username: username,
+		password: password,
+		regtest: false,
+
+	}
+
 	// make the http client
 	http_client := make_client()
 
@@ -199,6 +125,7 @@ func main() {
 	// format curr_height
 	curr_height, err := strconv.Atoi(base_height)
 	if err != nil {
+		log.Fatal(err)
 		fmt.Println("stringtoint ERROR", err)
 	}
 	// move currheight to first comb block (481824)
@@ -210,14 +137,16 @@ func main() {
 		// wait 5 seconds
 		time.Sleep(5 * time.Second)
 
+		// Check for reorg
+
 		// Pull the current BTC height
-		btc_height := int(make_bitcoin_call(http_client, "getblockcount", "").(float64))
+		btc_height := int(make_bitcoin_call(http_client, "getblockcount", "", u_config).(float64))
 		// If caught up, skip this cycle
 		if btc_height == curr_height {
 			continue
 		}
 
-		mine(MiningConfig{username: "user", password: "password", start_height: curr_height, target_height: btc_height, direction: 1, regtest: false})
+		curr_height = mine(MiningConfig{username: u_config.username, password: u_config.password, start_height: curr_height, target_height: btc_height, direction: 1, regtest: u_config.regtest})
 	}
 }
 

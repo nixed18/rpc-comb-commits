@@ -126,11 +126,13 @@ type Caller struct {
 	// Output Channel Reference
 	out_chan chan Call_Output
 
+	// Miner Emergency Channel
+	e_chan chan int
 
 }
 
 
-func make_caller(in_user, in_pass string, index *Index) *Caller {
+func make_caller(in_user, in_pass string, e_chan chan int, index *Index) *Caller {
 	in_http_client := &http.Client{
 		Transport: &http.Transport{
 			MaxIdleConnsPerHost: 10,
@@ -142,6 +144,7 @@ func make_caller(in_user, in_pass string, index *Index) *Caller {
 		user: in_user,
 		pass: in_pass,
 		http_client: in_http_client,
+		e_chan: e_chan,
 	}
 	return caller
 }
@@ -211,11 +214,34 @@ func (c Caller) run() {
 			return
 		}
 
+		// Check for emergency calls from the miner
+		select {
+		case height := <- c.e_chan:
+
+			//Run the emergency call
+			co := &Call_Output{height: height, content: c.get_block_info_for_height(height)}
+			go read_block(c.index, co)
+
+		default:
+		}
+
 		// Every 200 cycles check if ahead by 500, if so, wait until caught up to 200
 		if x >= 200 {
 			x = 0
 			if c.index.call_counter.check() > c.index.mine_counter.check() + 500*c.index.direction {
 				for c.index.call_counter.check() > c.index.mine_counter.check() + 200*c.index.direction{
+
+					// Check again for emergency calls
+					select {
+					case height := <- c.e_chan:
+
+						//Run the emergency call
+						co := &Call_Output{height: height, content: c.get_block_info_for_height(height)}
+						go read_block(c.index, co)
+			
+					default:
+					}
+
 					time.Sleep(500 * time.Millisecond)
 				}
 			}
@@ -233,7 +259,6 @@ func (c Caller) run() {
 		}
 
 		co := &Call_Output{height: c.current_pull, content: c.get_block_info_for_height(c.current_pull)}
-		
 		go read_block(c.index, co)
 
 		x++
@@ -258,13 +283,19 @@ func read_block(index *Index, input *Call_Output) {
 		index.mine_counter.Lock()
 		ch := index.mine_counter.h
 		index.mine_counter.Unlock()
-		//fmt.Println(block_output.height)
+
 		switch {
 		case ch < block_output.height:
+			// Wait
 			time.Sleep(5*time.Millisecond)
 			continue
 		case ch == block_output.height:
+			// My turn
 			index.to_miner <- block_output.content
+			return
+		case ch > block_output.height:
+			// Orphaned
+			log.Println("Orphaned Reader at height ", ch)
 			return
 		}
 	}
@@ -327,6 +358,7 @@ func p_get_all_P2WSH(height int, block_json map[string]interface{}) *Read_Block 
 type Miner struct {
 	index *Index
 	in_chan chan [][4]string
+	e_chan chan int
 }
 
 func (m Miner) mine(input [][4]string) {
@@ -352,21 +384,40 @@ func (m Miner) mine(input [][4]string) {
 }
 
 func (m Miner) run() {
+
+	// Emergency counter
+	x := 0
+
 	for {
 		// If run is off, stop running
 		if !m.index.run {
-			//return
+			return
 		}
 		
-		// Mine the block
-		m.mine(<-m.in_chan)
+		select {
+		case inc := <-m.in_chan:
+			// Mine the block
+			m.mine(inc)
 
-		// Increment counter
-		m.index.mine_counter.tick()
-		//m.index.mine_counter.Lock()
-		//m.index.mine_counter.h++
-		//m.index.mine_counter.Unlock()
+			// Increment counter
+			m.index.mine_counter.tick()
+			
+			// Reset emergency counter
+			x = 0
 
+		default:
+			x++
+			switch {
+			case x > 30:
+				fmt.Println("EMERGENCY PULL", m.index.mine_counter.check())
+				// Make an emergency pull request for the current height
+				m.e_chan <- m.index.mine_counter.check()
+				x = 0
+			default:
+				time.Sleep(time.Second)
+
+			}
+		}
 	}
 }
 
@@ -391,7 +442,7 @@ func p_make_haircomb_call(url string, wait bool) string {
 } 
 
 
-func mine(config MiningConfig) {
+func mine(config MiningConfig) int {
 
 
 	// Make the counters
@@ -422,13 +473,14 @@ func mine(config MiningConfig) {
 	miner := &Miner{
 		index: index,
 		in_chan: index.to_miner,
+		e_chan: make(chan int),
 	}
 	go miner.run()
 		
 	// Make callers
 	callers := []*Caller{}
 	for x:= 1; x <= 6; x++ {
-		callers = append(callers, make_caller(config.username, config.password, index))
+		callers = append(callers, make_caller(config.username, config.password, miner.e_chan, index))
 	}
 
 	// Run a non-concurrent test
@@ -456,4 +508,5 @@ func mine(config MiningConfig) {
 
 	fmt.Println("DONE")
 	fmt.Println("TIME:", float64(time.Now().UnixNano() - time_start)/float64(1000000000), "seconds")
+	return index.mine_counter.t
 }	
