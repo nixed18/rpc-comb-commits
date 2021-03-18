@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 	//"flag"
+	"github.com/syndtr/goleveldb/leveldb"
 
 	//"log"
 	//"os/exec"
@@ -23,6 +24,7 @@ type UserConfig struct {
 	username string
 	password string
 	regtest bool
+	mined_db_path string
 }
 
 func make_client() *http.Client {
@@ -93,19 +95,56 @@ func make_bitcoin_call(client *http.Client, method, params string, u_config *Use
 }
 
 
-
 func reorg_check(client *http.Client, hc_height int, u_config *UserConfig) bool {
+	// Load the DB
+	db, err := leveldb.OpenFile(u_config.mined_db_path, nil)
+	if err != nil {
+		log.Fatal("DB open error", err)
+	}
+	defer db.Close()
+
 	// Reference the mined blocks db for the most recent block hash, and compare it against the hash of the block in the BTC chain
-	if get_hc_block_hash(hc_height) == strings.TrimRight(fmt.Sprintf("%v", make_bitcoin_call(client, "getblockhash", fmt.Sprint(hc_height), u_config)), "\r\n") {
+	hc_hash, err := db.Get([]byte(fmt.Sprint(hc_height)), nil)
+	if err != nil {
+		log.Fatal("DB GET ERROR", err)
+	}
+
+	if string(hc_hash) == strings.TrimRight(fmt.Sprintf("%v", make_bitcoin_call(client, "getblockhash", fmt.Sprint(hc_height), u_config)), "\r\n") {
 		return false
 	} 
 	return true
 }
 
-func get_hc_block_hash(height int) string {
-	// Pull from the stored DB of HC's mined blocks
-	return "hash_here"
+
+func find_reorg(client *http.Client, hc_height int, u_config *UserConfig) int {
+
+	// Set an stop limit
+	lowest := 481824
+	if u_config.regtest {
+		lowest = 0
+	}
+
+	// Load the DB
+	db, err := leveldb.OpenFile(u_config.mined_db_path, nil)
+	if err != nil {
+		log.Fatal("DB open error", err)
+	}
+	defer db.Close()
+
+	// Compare until found
+	for hc_height > lowest {
+		hc_hash, err := db.Get([]byte(fmt.Sprint(hc_height)), nil)
+		if err != nil {
+			log.Fatal("DB GET ERROR", err)
+		}
+		if string(hc_hash) == strings.TrimRight(fmt.Sprintf("%v", make_bitcoin_call(client, "getblockhash", fmt.Sprint(hc_height), u_config)), "\r\n") {
+			return hc_height
+		}
+		hc_height--
+	}
+	return hc_height
 }
+
 
 func main() {
 	// Define the user config
@@ -113,23 +152,25 @@ func main() {
 		username: username,
 		password: password,
 		regtest: false,
-
+		mined_db_path: "mined_blocks",
 	}
 
-	// make the http client
+	// make the http client for main calls
 	http_client := make_client()
 
 	// ping haircomb for highest known block
 	base_height := make_haircomb_call("/height/get", true)
 	fmt.Println(base_height)
+
 	// format curr_height
 	curr_height, err := strconv.Atoi(base_height)
 	if err != nil {
 		log.Fatal(err)
 		fmt.Println("stringtoint ERROR", err)
 	}
-	// move currheight to first comb block (481824)
-	if curr_height < 481824 {
+
+	//If not regtest, make the current height the first COMB block
+	if !u_config.regtest && curr_height < 481824 {
 		curr_height = 481824
 	}
 
@@ -137,16 +178,28 @@ func main() {
 		// wait 5 seconds
 		time.Sleep(5 * time.Second)
 
+		// Set the initial mine_dir
+		mine_dir := 1
+
 		// Check for reorg
+		if curr_height > 481824 && reorg_check(http_client, curr_height, u_config) {
+			// If reorg, then identify the block height to reorg to
+			curr_height = find_reorg(http_client, curr_height, u_config)
+
+			// Set the mine_dir to -1
+			mine_dir = -1
+		}
 
 		// Pull the current BTC height
 		btc_height := int(make_bitcoin_call(http_client, "getblockcount", "", u_config).(float64))
+
 		// If caught up, skip this cycle
 		if btc_height == curr_height {
 			continue
 		}
 
-		curr_height = mine(MiningConfig{username: u_config.username, password: u_config.password, start_height: curr_height, target_height: btc_height, direction: 1, regtest: u_config.regtest})
+		curr_height = mine(MiningConfig{username: u_config.username, password: u_config.password, start_height: curr_height, target_height: btc_height, direction: mine_dir, regtest: u_config.regtest, mined_db_path: u_config.mined_db_path})
+
 	}
 }
 

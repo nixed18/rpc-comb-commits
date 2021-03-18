@@ -4,13 +4,12 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
-
-	//"log"
 	"encoding/json"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
+	"github.com/syndtr/goleveldb/leveldb"
 )
 
 // ~~~COUNTER~~~
@@ -63,18 +62,23 @@ type MiningConfig struct {
 
 	// Regtest
 	regtest bool
+
+	// DB Path
+	mined_db_path string
 }
 
 
 // Output by callers
 type Call_Output struct {
 	height int
+	hash string
 	content interface{}
 }
 
 // Read_Block
 type Read_Block struct{
 	height int
+	hash string
 	content [][4]string
 }
 
@@ -87,7 +91,7 @@ type Index struct {
 	run bool
 
 	// Channel to the miner, reffed by readers
-	to_miner chan [][4]string
+	to_miner chan *Read_Block
 
 	// Counters
 	call_counter *Counter
@@ -149,6 +153,7 @@ func make_caller(in_user, in_pass string, e_chan chan int, index *Index) *Caller
 	return caller
 }
 
+
 func (c Caller) make_bitcoin_call(method string, params string) interface{} {
 	port := "8332"
 	if c.index.regtest{
@@ -191,7 +196,8 @@ func (c Caller) make_bitcoin_call(method string, params string) interface{} {
 	return result["result"]
 }
 
-func (c Caller) get_block_info_for_height(height int) map[string]interface{} {
+
+func (c Caller) get_block_info_for_height(height int) (map[string]interface{}, string) {
 
 	// Get hash and remove \n
 	hash := strings.TrimRight(fmt.Sprintf("%v", c.make_bitcoin_call("getblockhash", fmt.Sprint(height))), "\r\n")
@@ -199,8 +205,9 @@ func (c Caller) get_block_info_for_height(height int) map[string]interface{} {
 	// Get Block 
 	block_info := c.make_bitcoin_call("getblock", "\""+hash+"\", "+"2").(map[string]interface{})
 	
-	return block_info
+	return block_info, hash
 }
+
 
 func (c Caller) run() {
 	// Outer loop runs forever, inner loop only runs if set active
@@ -219,7 +226,8 @@ func (c Caller) run() {
 		case height := <- c.e_chan:
 
 			//Run the emergency call
-			co := &Call_Output{height: height, content: c.get_block_info_for_height(height)}
+			out, hash := c.get_block_info_for_height(height)
+			co := &Call_Output{height: height, hash: hash, content: out}
 			go read_block(c.index, co)
 
 		default:
@@ -236,7 +244,8 @@ func (c Caller) run() {
 					case height := <- c.e_chan:
 
 						//Run the emergency call
-						co := &Call_Output{height: height, content: c.get_block_info_for_height(height)}
+						out, hash := c.get_block_info_for_height(height)
+						co := &Call_Output{height: height, hash: hash, content: out}
 						go read_block(c.index, co)
 			
 					default:
@@ -258,7 +267,8 @@ func (c Caller) run() {
 			c.current_pull = res
 		}
 
-		co := &Call_Output{height: c.current_pull, content: c.get_block_info_for_height(c.current_pull)}
+		out, hash := c.get_block_info_for_height(c.current_pull)
+		co := &Call_Output{height: c.current_pull, hash: hash, content: out}
 		go read_block(c.index, co)
 
 		x++
@@ -266,11 +276,13 @@ func (c Caller) run() {
 }
 
 
+
 // ~~~READER~~~
 
 func read_block(index *Index, input *Call_Output) {
 	// Read the block
 	block_output := p_get_all_P2WSH(input.height, input.content.(map[string]interface{}))
+	block_output.hash = input.hash
 	
 	// Wait your turn, then mine
 	for {
@@ -291,7 +303,7 @@ func read_block(index *Index, input *Call_Output) {
 			continue
 		case ch == block_output.height:
 			// My turn
-			index.to_miner <- block_output.content
+			index.to_miner <- block_output
 			return
 		case ch > block_output.height:
 			// Orphaned
@@ -301,7 +313,9 @@ func read_block(index *Index, input *Call_Output) {
 	}
 }
 
+
 func p_get_all_P2WSH(height int, block_json map[string]interface{}) *Read_Block {
+
 
 	add_array := [][4]string{}
 
@@ -357,30 +371,29 @@ func p_get_all_P2WSH(height int, block_json map[string]interface{}) *Read_Block 
 
 type Miner struct {
 	index *Index
-	in_chan chan [][4]string
+	in_chan chan *Read_Block
 	e_chan chan int
+	hash_db *leveldb.DB
 }
 
-func (m Miner) mine(input [][4]string) {
+func (m Miner) mine(input *Read_Block) {
 
-
-	for i := range input {
-		url := "/mining/mine/"+input[i][0]+"/"+input[i][1]+input[i][2]+input[i][3]
-		//make_haircomb_call(url, false)
+	for i := range input.content {
+		url := "/mining/mine/"+input.content[i][0]+"/"+input.content[i][1]+input.content[i][2]+input.content[i][3]
 		p_make_haircomb_call(url, false)
-		//fmt.Sprint(url)
 	}
 
 	// Flush
 	p_make_haircomb_call("/mining/mine/FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF/9999999999999999", false)
 
-	fmt.Println("MINED:", m.index.mine_counter.h)
-
-	/*
-	if len(input) > 0 {
-		fmt.Println("MINED:", input[0][1])
+	// Commit hash to DB
+	err := m.hash_db.Put([]byte(fmt.Sprint(input.height)), []byte(input.hash), nil)
+	if err != nil {
+		log.Fatal("HASH STORE ERROR", err)
 	}
-	*/
+
+	fmt.Println("MINED:", m.index.mine_counter.h)
+	
 }
 
 func (m Miner) run() {
@@ -444,6 +457,12 @@ func p_make_haircomb_call(url string, wait bool) string {
 
 func mine(config MiningConfig) int {
 
+	// Load the DB
+	db, err := leveldb.OpenFile(config.mined_db_path, nil)
+	if err != nil {
+		log.Fatal("DB open error", err)
+	}
+	defer db.Close()
 
 	// Make the counters
 	call_counter := &Counter{
@@ -463,7 +482,7 @@ func mine(config MiningConfig) int {
 	index := &Index{
 		call_counter: call_counter,
 		mine_counter: mine_counter,
-		to_miner: make(chan [][4]string),
+		to_miner: make(chan *Read_Block),
 		run: true,
 		regtest: config.regtest,
 		direction: config.direction,
@@ -474,6 +493,7 @@ func mine(config MiningConfig) int {
 		index: index,
 		in_chan: index.to_miner,
 		e_chan: make(chan int),
+		hash_db: db,
 	}
 	go miner.run()
 		
@@ -482,14 +502,8 @@ func mine(config MiningConfig) int {
 	for x:= 1; x <= 6; x++ {
 		callers = append(callers, make_caller(config.username, config.password, miner.e_chan, index))
 	}
-
-	// Run a non-concurrent test
-	/*callers[0].active = true
-	go callers[0].run()
-	*/
 	
-	
-	// Run a concurrent test
+	// Run concurrent
 	for x := range callers {
 		callers[x].active = true
 		go callers[x].run()
