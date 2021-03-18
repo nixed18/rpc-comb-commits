@@ -91,7 +91,7 @@ type Index struct {
 	run bool
 
 	// Channel to the miner, reffed by readers
-	to_miner chan *Read_Block
+	to_miner chan Read_Block
 
 	// Counters
 	call_counter *Counter
@@ -314,7 +314,7 @@ func read_block(index *Index, input *Call_Output) {
 }
 
 
-func p_get_all_P2WSH(height int, block_json map[string]interface{}) *Read_Block {
+func p_get_all_P2WSH(height int, block_json map[string]interface{}) Read_Block {
 
 
 	add_array := [][4]string{}
@@ -359,7 +359,7 @@ func p_get_all_P2WSH(height int, block_json map[string]interface{}) *Read_Block 
 			}
 		}
 	} 	
-	output := &Read_Block{
+	output := Read_Block{
 		height: height,
 		content: add_array,
 	}
@@ -371,15 +371,18 @@ func p_get_all_P2WSH(height int, block_json map[string]interface{}) *Read_Block 
 
 type Miner struct {
 	index *Index
-	in_chan chan *Read_Block
+	in_chan chan Read_Block
 	e_chan chan int
 	hash_db *leveldb.DB
 }
 
-func (m Miner) mine(input *Read_Block) {
+func (m Miner) mine(input Read_Block) {
 
-	for i := range input.content {
-		url := "/mining/mine/"+input.content[i][0]+"/"+input.content[i][1]+input.content[i][2]+input.content[i][3]
+	content := input.content
+
+
+	for i := range content {
+		url := "/mining/mine/"+content[i][0]+"/"+content[i][1]+content[i][2]+content[i][3]
 		p_make_haircomb_call(url, false)
 	}
 
@@ -482,7 +485,7 @@ func mine(config MiningConfig) int {
 	index := &Index{
 		call_counter: call_counter,
 		mine_counter: mine_counter,
-		to_miner: make(chan *Read_Block),
+		to_miner: make(chan Read_Block),
 		run: true,
 		regtest: config.regtest,
 		direction: config.direction,

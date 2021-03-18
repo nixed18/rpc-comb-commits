@@ -109,9 +109,13 @@ func reorg_check(client *http.Client, hc_height int, u_config *UserConfig) bool 
 		log.Fatal("DB GET ERROR", err)
 	}
 
-	if string(hc_hash) == strings.TrimRight(fmt.Sprintf("%v", make_bitcoin_call(client, "getblockhash", fmt.Sprint(hc_height), u_config)), "\r\n") {
+	btc_hash := strings.TrimRight(fmt.Sprintf("%v", make_bitcoin_call(client, "getblockhash", fmt.Sprint(hc_height), u_config)), "\r\n")
+
+	if string(hc_hash) == btc_hash {
+		fmt.Println("NO REORG AT HEIGHT", fmt.Sprint(hc_height), ":", string(hc_hash), btc_hash)
 		return false
 	} 
+	fmt.Println("REORG AT HEIGHT", fmt.Sprint(hc_height), ":", string(hc_hash), btc_hash)
 	return true
 }
 
@@ -181,8 +185,15 @@ func main() {
 		// Set the initial mine_dir
 		mine_dir := 1
 
+		// Set reorg check lowest
+		lowest := 481824
+		if u_config.regtest {
+			lowest = 0
+		}
+
+
 		// Check for reorg
-		if curr_height > 481824 && reorg_check(http_client, curr_height, u_config) {
+		if curr_height > lowest && reorg_check(http_client, curr_height, u_config) {
 			// If reorg, then identify the block height to reorg to
 			curr_height = find_reorg(http_client, curr_height, u_config)
 
