@@ -402,7 +402,7 @@ func (m Miner) mine(input Read_Block) {
 func (m Miner) run() {
 
 	// Emergency counter
-	x := 0
+	x := time.Now()
 
 	for {
 		// If run is off, stop running
@@ -419,19 +419,14 @@ func (m Miner) run() {
 			m.index.mine_counter.tick()
 			
 			// Reset emergency counter
-			x = 0
+			x = time.Now()
 
 		default:
-			x++
-			switch {
-			case x > 30:
+			if time.Since(x) > 30*time.Second{
 				fmt.Println("EMERGENCY PULL", m.index.mine_counter.check())
 				// Make an emergency pull request for the current height
 				m.e_chan <- m.index.mine_counter.check()
-				x = 0
-			default:
-				time.Sleep(time.Second)
-
+				x = time.Now()
 			}
 		}
 	}
