@@ -25,7 +25,8 @@ type Counter struct {
 func (c *Counter) tick() int {
 	c.Lock()
 	// If h is still within s->t go, else stop
-	switch (c.h >= c.s && c.h <= c.t) {
+	fmt.Println(c.s, c.h, c.t)
+	switch (c.h >= c.s && c.h <= c.t) || (c.h <= c.s && c.h >= c.t) {
 	case true:
 		output := c.h
 		c.h = c.h + c.dir
@@ -102,6 +103,9 @@ type Index struct {
 
 	// Direction
 	direction int
+
+	// Hash db
+	hash_db *leveldb.DB
 }
 
 
@@ -166,23 +170,20 @@ func (c Caller) make_bitcoin_call(method string, params string) interface{} {
 	req, err := http.NewRequest("POST", "http://"+c.user+":"+c.pass+"@127.0.0.1:"+port, body)
 
 	if err != nil {
-		fmt.Println("phone btc ERROR", err)
-		log.Fatal(err)
+		log.Fatal("phone btc ERROR", err)
 	}
 	req.Header.Set("Content-Type", "text/plain")
 	resp, err := c.http_client.Do(req)
 	
 	if err != nil {
-		fmt.Println(fmt.Println("phone btc ERROR 2", err))
-		log.Fatal(err)
+		log.Fatal("phone btc ERROR 2", err)
 
 	}
 
 	defer resp.Body.Close()
 	resp_bytes, err :=  ioutil.ReadAll(resp.Body)
 	if err != nil {
-		fmt.Println(fmt.Println("phone btc ERROR 3", err))
-		log.Fatal(err)
+		log.Fatal("phone btc ERROR 3", err)
 
 	}
 	var result map[string]interface{}
@@ -199,8 +200,21 @@ func (c Caller) make_bitcoin_call(method string, params string) interface{} {
 
 func (c Caller) get_block_info_for_height(height int) (map[string]interface{}, string) {
 
-	// Get hash and remove \n
-	hash := strings.TrimRight(fmt.Sprintf("%v", c.make_bitcoin_call("getblockhash", fmt.Sprint(height))), "\r\n")
+	var hash string
+
+	if c.index.direction == 1 {
+		// If MINE
+		// Get hash and remove \n
+		hash = strings.TrimRight(fmt.Sprintf("%v", c.make_bitcoin_call("getblockhash", fmt.Sprint(height))), "\r\n")
+	} else {
+		// If UNMINE
+		// Get hash from DB
+		hc_hash, err := c.index.hash_db.Get([]byte(fmt.Sprint(height)), nil)
+		if err != nil {
+			log.Fatal("DB GET ERROR", err)
+		}
+		hash = string(hc_hash)
+	}
 
 	// Get Block 
 	block_info := c.make_bitcoin_call("getblock", "\""+hash+"\", "+"2").(map[string]interface{})
@@ -256,8 +270,8 @@ func (c Caller) run() {
 			}
 		}
 
-
 		res := c.index.call_counter.tick()
+		fmt.Println("RES = ", res)
 		switch res {
 		case -1:
 			// STOP
@@ -281,7 +295,7 @@ func (c Caller) run() {
 
 func read_block(index *Index, input *Call_Output) {
 	// Read the block
-	block_output := p_get_all_P2WSH(input.height, input.content.(map[string]interface{}))
+	block_output := p_get_all_P2WSH(input.height, input.content.(map[string]interface{}), index)
 	block_output.hash = input.hash
 	
 	// Wait your turn, then mine
@@ -314,7 +328,7 @@ func read_block(index *Index, input *Call_Output) {
 }
 
 
-func p_get_all_P2WSH(height int, block_json map[string]interface{}) Read_Block {
+func p_get_all_P2WSH(height int, block_json map[string]interface{}, index *Index) Read_Block {
 
 
 	add_array := [][4]string{}
@@ -345,10 +359,16 @@ func p_get_all_P2WSH(height int, block_json map[string]interface{}) Read_Block {
 						// Pull the hex
 						if scriptPubKey["hex"] != nil{
 							//fmt.Println(scriptPubKey)
+
+							// Setup the storage height
+							s_height := height
+							if index.direction == -1 {
+								s_height += 50000000
+							}
 							hex := fmt.Sprintf("%v", scriptPubKey["hex"])
 							ro := [4]string{
 								strings.ToUpper(hex[4:]),
-								fmt.Sprintf("%08d", height),
+								fmt.Sprintf("%08d", s_height),
 								fmt.Sprintf("%04d", x),
 								fmt.Sprintf("%04d", i), 
 							}
@@ -373,7 +393,6 @@ type Miner struct {
 	index *Index
 	in_chan chan Read_Block
 	e_chan chan int
-	hash_db *leveldb.DB
 }
 
 func (m Miner) mine(input Read_Block) {
@@ -389,13 +408,27 @@ func (m Miner) mine(input Read_Block) {
 	// Flush
 	p_make_haircomb_call("/mining/mine/FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF/9999999999999999", false)
 
-	// Commit hash to DB
-	err := m.hash_db.Put([]byte(fmt.Sprint(input.height)), []byte(input.hash), nil)
-	if err != nil {
-		log.Fatal("HASH STORE ERROR", err)
+	if m.index.direction == 1 {
+		// If mine, commit hash to DB
+		err := m.index.hash_db.Put([]byte(fmt.Sprint(input.height)), []byte(input.hash), nil)
+		if err != nil {
+			log.Fatal("HASH STORE ERROR", err)
+		}
+	} else {
+		// Else erase hash from db
+		err := m.index.hash_db.Delete([]byte(fmt.Sprint(input.height)), nil)
+		if err != nil {
+			if err.Error() != "leveldb: not found" {
+				log.Fatal("Hash Erase error: ", err)
+			}
+		}
 	}
 
 	fmt.Println("MINED:", m.index.mine_counter.h)
+
+	// Increment counter
+	m.index.mine_counter.tick()
+
 	
 }
 
@@ -403,9 +436,9 @@ func (m Miner) run() {
 
 	// Emergency counter
 	x := time.Now()
-
 	for {
 		// If run is off, stop running
+		fmt.Print(m.index.run)
 		if !m.index.run {
 			return
 		}
@@ -414,9 +447,6 @@ func (m Miner) run() {
 		case inc := <-m.in_chan:
 			// Mine the block
 			m.mine(inc)
-
-			// Increment counter
-			m.index.mine_counter.tick()
 			
 			// Reset emergency counter
 			x = time.Now()
@@ -435,7 +465,7 @@ func (m Miner) run() {
 func p_make_haircomb_call(url string, wait bool) string {
 	resp, err := http.Get("http://127.0.0.1:2121"+url)
 	if err != nil {
-		fmt.Println("phone comb ERROR", err)
+		log.Fatal("phone comb ERROR", err)
 	}
 
 	defer resp.Body.Close()
@@ -443,7 +473,7 @@ func p_make_haircomb_call(url string, wait bool) string {
 	if wait {
 		resp_bytes, err :=  ioutil.ReadAll(resp.Body)
 		if err != nil {
-			fmt.Println(fmt.Println("phone comb ERROR 2", err))
+			log.Fatal("phone comb ERROR 2", err)
 
 		}
 		return string(resp_bytes)
@@ -454,14 +484,14 @@ func p_make_haircomb_call(url string, wait bool) string {
 
 
 func mine(config MiningConfig) int {
-
+	fmt.Println("START with: ", config.start_height, config.target_height, config.direction)
 	// Load the DB
 	db, err := leveldb.OpenFile(config.mined_db_path, nil)
 	if err != nil {
 		log.Fatal("DB open error", err)
 	}
 	defer db.Close()
-
+	//fmt.Println("m1")
 	// Make the counters
 	call_counter := &Counter{
 		s: config.start_height,
@@ -484,41 +514,46 @@ func mine(config MiningConfig) int {
 		run: true,
 		regtest: config.regtest,
 		direction: config.direction,
+		hash_db: db,
 	}
-	
+	//fmt.Println("m2")
 	// Make the miner
 	miner := &Miner{
 		index: index,
 		in_chan: index.to_miner,
 		e_chan: make(chan int),
-		hash_db: db,
 	}
 	go miner.run()
-		
+	//fmt.Println("m3")
 	// Make callers
 	callers := []*Caller{}
 	for x:= 1; x <= 6; x++ {
 		callers = append(callers, make_caller(config.username, config.password, miner.e_chan, index))
 	}
-	
+	//fmt.Println("m4")
+	// Run single
+	/*callers[0].active = true
+	go callers[0].run()*/
+
 	// Run concurrent
 	for x := range callers {
 		callers[x].active = true
 		go callers[x].run()
 	}
-
 	time_start := time.Now().UnixNano()
 	for {
 		index.mine_counter.Lock()
 		if index.mine_counter.h == index.mine_counter.t+index.mine_counter.dir{
 			index.mine_counter.Unlock()
+			index.run = false
 			break
 		}
 		index.mine_counter.Unlock()
-		time.Sleep(time.Millisecond)
+		time.Sleep(100*time.Millisecond)
 	}
 
-	fmt.Println("DONE")
-	fmt.Println("TIME:", float64(time.Now().UnixNano() - time_start)/float64(1000000000), "seconds")
+	fmt.Println("DONE to: ", index.mine_counter.t)
+	log.Println("DONE")
+	log.Println("TIME:", float64(time.Now().UnixNano() - time_start)/float64(1000000000), "seconds")
 	return index.mine_counter.t
 }	

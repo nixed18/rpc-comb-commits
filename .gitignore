@@ -1,3 +1,5 @@
 *.exe
 logs/
 mined_blocks/
+mined_blocks-reorg1/
+*.log

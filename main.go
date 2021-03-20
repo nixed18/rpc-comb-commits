@@ -7,12 +7,13 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
+
 	//"flag"
 	"github.com/syndtr/goleveldb/leveldb"
-
 	//"log"
 	//"os/exec"
 )
@@ -59,10 +60,15 @@ func make_haircomb_call(url string, wait bool) string {
 
 func make_bitcoin_call(client *http.Client, method, params string, u_config *UserConfig) interface{} {
 
+	port := "8332"
+	if u_config.regtest{
+		port = "18443"
+	}
+
 	fmt.Println("MAKE CALL", method, params)
 	// make post
 	body := strings.NewReader("{\"jsonrpc\":\"1.0\",\"id\":\"curltext\",\"method\":\""+method+"\",\"params\":["+params+"]}")
-	req, err := http.NewRequest("POST", "http://"+u_config.username+":"+u_config.password+"@127.0.0.1:8332", body)
+	req, err := http.NewRequest("POST", "http://"+u_config.username+":"+u_config.password+"@127.0.0.1:"+port, body)
 
 
 	if err != nil {
@@ -106,6 +112,11 @@ func reorg_check(client *http.Client, hc_height int, u_config *UserConfig) bool 
 	// Reference the mined blocks db for the most recent block hash, and compare it against the hash of the block in the BTC chain
 	hc_hash, err := db.Get([]byte(fmt.Sprint(hc_height)), nil)
 	if err != nil {
+		// If key can't be found, return true
+		if err.Error() == "leveldb: not found" {
+			fmt.Println("p3")
+			return true
+		}
 		log.Fatal("DB GET ERROR", err)
 	}
 
@@ -139,6 +150,11 @@ func find_reorg(client *http.Client, hc_height int, u_config *UserConfig) int {
 	for hc_height > lowest {
 		hc_hash, err := db.Get([]byte(fmt.Sprint(hc_height)), nil)
 		if err != nil {
+			if err.Error() == "leveldb: not found" {
+				fmt.Println("p4")
+				hc_height--
+				continue
+			}
 			log.Fatal("DB GET ERROR", err)
 		}
 		if string(hc_hash) == strings.TrimRight(fmt.Sprintf("%v", make_bitcoin_call(client, "getblockhash", fmt.Sprint(hc_height), u_config)), "\r\n") {
@@ -151,11 +167,19 @@ func find_reorg(client *http.Client, hc_height int, u_config *UserConfig) int {
 
 
 func main() {
+	// Setup Logging
+	logfile, err := os.OpenFile("info.log", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer logfile.Close()
+	log.SetOutput(logfile)
+
 	// Define the user config
 	u_config := &UserConfig{
 		username: username,
 		password: password,
-		regtest: false,
+		regtest: true,
 		mined_db_path: "mined_blocks",
 	}
 
@@ -169,11 +193,10 @@ func main() {
 	// format curr_height
 	curr_height, err := strconv.Atoi(base_height)
 	if err != nil {
-		log.Fatal(err)
-		fmt.Println("stringtoint ERROR", err)
+		log.Fatal("stringtoint ERROR", err)
 	}
 
-	//If not regtest, make the current height the first COMB block
+	// If not regtest, make the current height the first COMB block
 	if !u_config.regtest && curr_height < 481824 {
 		curr_height = 481824
 	}
@@ -185,31 +208,35 @@ func main() {
 		// Set the initial mine_dir
 		mine_dir := 1
 
+		// Pull the current BTC height
+		target_height := int(make_bitcoin_call(http_client, "getblockcount", "", u_config).(float64))
+		
+		// If caught up, skip this cycle
+		if target_height == curr_height {
+			continue
+		}
+
+		fmt.Println("CURR: ", curr_height, ", TARGET: ", target_height)
+
 		// Set reorg check lowest
 		lowest := 481824
 		if u_config.regtest {
 			lowest = 0
 		}
 
-
 		// Check for reorg
 		if curr_height > lowest && reorg_check(http_client, curr_height, u_config) {
 			// If reorg, then identify the block height to reorg to
-			curr_height = find_reorg(http_client, curr_height, u_config)
-
+			target_height = find_reorg(http_client, curr_height, u_config)
+			fmt.Println(2)
 			// Set the mine_dir to -1
 			mine_dir = -1
+			fmt.Println("REORG: ", curr_height, " ", target_height)
 		}
 
-		// Pull the current BTC height
-		btc_height := int(make_bitcoin_call(http_client, "getblockcount", "", u_config).(float64))
 
-		// If caught up, skip this cycle
-		if btc_height == curr_height {
-			continue
-		}
 
-		curr_height = mine(MiningConfig{username: u_config.username, password: u_config.password, start_height: curr_height, target_height: btc_height, direction: mine_dir, regtest: u_config.regtest, mined_db_path: u_config.mined_db_path})
+		curr_height = mine(MiningConfig{username: u_config.username, password: u_config.password, start_height: curr_height, target_height: target_height, direction: mine_dir, regtest: u_config.regtest, mined_db_path: u_config.mined_db_path})
 
 	}
 }
