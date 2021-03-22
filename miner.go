@@ -25,7 +25,6 @@ type Counter struct {
 func (c *Counter) tick() int {
 	c.Lock()
 	// If h is still within s->t go, else stop
-	fmt.Println(c.s, c.h, c.t)
 	switch (c.h >= c.s && c.h <= c.t) || (c.h <= c.s && c.h >= c.t) {
 	case true:
 		output := c.h
@@ -211,7 +210,7 @@ func (c Caller) get_block_info_for_height(height int) (map[string]interface{}, s
 		// Get hash from DB
 		hc_hash, err := c.index.hash_db.Get([]byte(fmt.Sprint(height)), nil)
 		if err != nil {
-			log.Fatal("DB GET ERROR", err)
+			log.Fatal("Can't find block hash to get unmine addresses", err)
 		}
 		hash = string(hc_hash)
 	}
@@ -271,13 +270,13 @@ func (c Caller) run() {
 		}
 
 		res := c.index.call_counter.tick()
-		fmt.Println("RES = ", res)
 		switch res {
 		case -1:
 			// STOP
 			continue
 		default:
 			// Pull for res
+			fmt.Println("RES = ", res)
 			c.current_pull = res
 		}
 
@@ -294,6 +293,7 @@ func (c Caller) run() {
 // ~~~READER~~~
 
 func read_block(index *Index, input *Call_Output) {
+	fmt.Println("READ FOR ", input.height)
 	// Read the block
 	block_output := p_get_all_P2WSH(input.height, input.content.(map[string]interface{}), index)
 	block_output.hash = input.hash
@@ -308,18 +308,19 @@ func read_block(index *Index, input *Call_Output) {
 
 		index.mine_counter.Lock()
 		ch := index.mine_counter.h
+		dir := index.mine_counter.dir
 		index.mine_counter.Unlock()
 
 		switch {
-		case ch < block_output.height:
+		case ch*dir < block_output.height*dir:
 			// Wait
 			time.Sleep(5*time.Millisecond)
 			continue
-		case ch == block_output.height:
+		case ch*dir == block_output.height*dir:
 			// My turn
 			index.to_miner <- block_output
 			return
-		case ch > block_output.height:
+		case ch*dir > block_output.height*dir:
 			// Orphaned
 			log.Println("Orphaned Reader at height ", ch)
 			return
@@ -427,7 +428,9 @@ func (m Miner) mine(input Read_Block) {
 	fmt.Println("MINED:", m.index.mine_counter.h)
 
 	// Increment counter
+	fmt.Println(m.index.mine_counter.s, m.index.mine_counter.h, m.index.mine_counter.t)
 	m.index.mine_counter.tick()
+	fmt.Println(m.index.mine_counter.s, m.index.mine_counter.h, m.index.mine_counter.t)
 
 	
 }
@@ -438,7 +441,6 @@ func (m Miner) run() {
 	x := time.Now()
 	for {
 		// If run is off, stop running
-		fmt.Print(m.index.run)
 		if !m.index.run {
 			return
 		}
