@@ -20,6 +20,7 @@ import (
 
 var username = "user"
 var password = "password"
+var regtest = false
 
 type UserConfig struct {
 	username string
@@ -179,7 +180,7 @@ func main() {
 	u_config := &UserConfig{
 		username: username,
 		password: password,
-		regtest: true,
+		regtest: regtest,
 		mined_db_path: "mined_blocks",
 	}
 
